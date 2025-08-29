@@ -1,62 +1,89 @@
-from fastapi import FastAPI, HTTPException
-from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure
-from pydantic import BaseModel
-from typing import List
+from fastapi import FastAPI
 
-# MongoDB connection URI
-MONGO_URI = "mongodb://admin:241203@localhost:27018/admin"
-
-# Create FastAPI app
 app = FastAPI()
 
-# Connect to MongoDB client
-client = MongoClient(MONGO_URI)
+fake_items_db = [{"item_name": "Chin"}, {"item_name": "Loan"},{"item_name": "Diu"} , {"item_name": "Hoang"}, {"item_name": "Duc"}]
 
-# Select the MongoDB database and collection
-db = client.test_db
-collection = db.test_collection
+# @app.get("/items/{item_id}")
+# async def read_item(item_id):
+#     return {"item_id": item_id}
 
-# Verify connection
-try:
-    client.admin.command('ping')
-    print("MongoDB connection successful!")
-except ConnectionFailure as e:
-    print(f"MongoDB connection failed: {e}")
+# @app.get("/users/Duc")
+# async def read_user_me():
+#     return {"user_id": "the current user"}
 
 
-# Pydantic model for input validation
-class Item(BaseModel):
-    name: str
-    description: str
+# @app.get("/users/{user_id}")
+# async def read_user(user_id: str):
+#     return {"user_id": user_id}
 
-# Endpoint to create a new item in MongoDB
-@app.post("/items/")
-async def create_item(item: Item):
-    try:
-        # Insert the item into MongoDB collection
-        result = collection.insert_one(item.dict())
-        return {"id": str(result.inserted_id), "name": item.name, "description": item.description}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error inserting item: {e}")
+# @app.get("/users")
+# async def read_users():
+#     return ["Duc1", "Duc2"]
 
-# Endpoint to get all items from MongoDB
-@app.get("/items/", response_model=List[Item])
-async def get_items():
-    try:
-        items = collection.find()
-        return [{"name": item["name"], "description": item["description"]} for item in items]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving items: {e}")
 
-# Endpoint to get an item by ID
-@app.get("/items/{item_id}", response_model=Item)
-async def get_item(item_id: str):
-    try:
-        item = collection.find_one({"_id": item_id})
-        if item:
-            return {"name": item["name"], "description": item["description"]}
-        else:
-            raise HTTPException(status_code=404, detail="Item not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving item: {e}")
+# @app.get("/users")
+# async def read_users2():
+#     return ["Duc3", "Duc4"]
+
+# @app.get("/items/")
+# async def read_item(skip: int = 0, limit: int = 10):
+#     return fake_items_db[skip : skip + limit]
+
+# @app.get("/items/{item_id}")
+# async def read_item(item_id: str, q: str | None = None):
+#     if q:
+#         return {"item_id": item_id, "q": q}
+#     return {"item_id": item_id}
+
+# @app.get("/items/{item_id}")
+# async def read_item(item_id: str, q: str | None = None, short: bool = False):
+#     item = {"item_id": item_id}
+#     if q:
+#         item.update({"q": q})
+#     if not short:
+#         item.update(
+#             {"description": "This is an amazing item that has a long description"}
+#         )
+#     return item
+
+# @app.get("/items/{item_id}")
+# async def read_user_item(item_id: str, needy: str):
+#     item = {"item_id": item_id, "needy": needy}
+#     return item
+
+
+patients_db = [
+    {"patient_id": "P001", "name": "Chin", "test_result": "HBsAg negative"},
+    {"patient_id": "P002", "name": "Loan", "test_result": "HBsAg positive"},
+    {"patient_id": "P003", "name": "Diu", "test_result": "Anti-HBs positive"},
+    {"patient_id": "P004", "name": "Hoang", "test_result": "HBsAg negative"},
+    {"patient_id": "P005", "name": "Duc", "test_result": "Anti-HBs negative"}
+]
+
+@app.get("/patients/")
+async def read_patients(skip: int = 0, limit: int = 10):
+    return patients_db[skip : skip + limit]
+
+@app.get("/patients/me")
+async def read_current_patient():
+    return {"patient_id": "current_patient", "message": "This is the current patient"}
+
+@app.get("/patients/{patient_id}")
+async def read_patient(patient_id: str, test_type: str | None = None, detailed: bool = False):
+    patient = {"patient_id": patient_id}
+    if test_type:
+        patient["test_type"] = test_type
+    if detailed:
+        patient["details"] = "This patient has a detailed medical record"
+    for p in patients_db:
+        if p["patient_id"] == patient_id:
+            patient.update(p)
+            break
+    return patient
+
+@app.get("/patients/{patient_id}/test")
+async def read_patient_test(patient_id: str, test_result: str):
+    return {"patient_id": patient_id, "test_result": test_result}
+
+

@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from pydantic import BaseModel
 
 app = FastAPI()
 
@@ -54,12 +55,17 @@ fake_items_db = [{"item_name": "Chin"}, {"item_name": "Loan"},{"item_name": "Diu
 
 
 patients_db = [
-    {"patient_id": "P001", "name": "Chin", "test_result": "HBsAg negative"},
-    {"patient_id": "P002", "name": "Loan", "test_result": "HBsAg positive"},
-    {"patient_id": "P003", "name": "Diu", "test_result": "Anti-HBs positive"},
-    {"patient_id": "P004", "name": "Hoang", "test_result": "HBsAg negative"},
-    {"patient_id": "P005", "name": "Duc", "test_result": "Anti-HBs negative"}
+    {"patient_id": "P001", "name": "Chin", "test_result": "HBsAg negative", "test_date": "2025-08-01"},
+    {"patient_id": "P002", "name": "Loan", "test_result": "HBsAg positive", "test_date": "2025-08-02"},
+    {"patient_id": "P003", "name": "Diu", "test_result": "Anti-HBs positive", "test_date": "2025-08-03"},
+    {"patient_id": "P004", "name": "Hoang", "test_result": "HBsAg negative", "test_date": "2025-08-04"},
+    {"patient_id": "P005", "name": "Duc", "test_result": "Anti-HBs negative", "test_date": "2025-08-05"}
 ]
+
+class Patient(BaseModel):
+    name: str
+    test_result: str | None = None
+    test_date: str | None = None
 
 @app.get("/patients/")
 async def read_patients(skip: int = 0, limit: int = 10):
@@ -86,4 +92,22 @@ async def read_patient(patient_id: str, test_type: str | None = None, detailed: 
 async def read_patient_test(patient_id: str, test_result: str):
     return {"patient_id": patient_id, "test_result": test_result}
 
+@app.post("/patients/")
+async def create_patient(patient: Patient):
+    new_id = f"P{len(patients_db) + 1:03d}"
+    patient_dict = patient.dict()
+    patient_dict["patient_id"] = new_id
+    patients_db.append(patient_dict)
+    return patient_dict
 
+@app.put("/patients/{patient_id}")
+async def update_patient(patient_id: str, patient: Patient):
+    patient_dict = patient.dict()
+    patient_dict["patient_id"] = patient_id
+    for i, existing_patient in enumerate(patients_db):
+        if existing_patient["patient_id"] == patient_id:
+            patients_db[i] = patient_dict
+            break
+    else:
+        patients_db.append(patient_dict)
+    return {"patient_id": patient_id, **patient_dict}

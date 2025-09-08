@@ -1,11 +1,15 @@
-from typing import Annotated
-from fastapi import Body, FastAPI, Query, Path, HTTPException
-from pydantic import BaseModel, Field, AfterValidator
+from fastapi import FastAPI, HTTPException, Request, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel, Field
+from typing import Annotated, Optional
+from fastapi import Query, Path, Body
+from pydantic.functional_validators import AfterValidator
+import jwt  
 import random
 
 app = FastAPI()
 
-fake_items_db = [{"item_name": "Chin"}, {"item_name": "Loan"},{"item_name": "Diu"} , {"item_name": "Hoang"}, {"item_name": "Duc"}]
+# fake_items_db = [{"item_name": "Chin"}, {"item_name": "Loan"},{"item_name": "Diu"} , {"item_name": "Hoang"}, {"item_name": "Duc"}]
 
 # @app.get("/items/{item_id}")
 # async def read_item(item_id):
@@ -56,6 +60,11 @@ fake_items_db = [{"item_name": "Chin"}, {"item_name": "Loan"},{"item_name": "Diu
 #     return item
 
 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+SECRET_KEY = "my-secret-key"
+ALGORITHM = "HS256"
+
 # Danh sách bệnh nhân mẫu
 patients_db = [
     {"patient_id": "P001", "name": "Chin", "test_result": "HBsAg negative", "test_date": "2025-08-01"},
@@ -68,13 +77,13 @@ patients_db = [
 # Mô hình Pydantic cho bệnh nhân
 class Patient(BaseModel):
     name: str = Field(..., min_length=1, title="Patient Name", description="Full name of the patient")
-    test_result: str | None = Field(
+    test_result: Optional[str] = Field(
         None,
         min_length=3,
         title="Test Result",
         description="Result of the medical test"
     )
-    test_date: str | None = Field(
+    test_date: Optional[str] = Field(
         None,
         pattern=r"^\d{4}-\d{2}-\d{2}$",  
         title="Test Date",
@@ -86,6 +95,49 @@ def check_valid_patient_id(patient_id: str) -> str:
     if not (patient_id.startswith("P") and len(patient_id) == 4 and patient_id[1:].isdigit()):
         raise ValueError('Invalid patient_id format, it must be "P" followed by 3 digits')
     return patient_id
+
+# Hàm kiểm tra username/password
+def verify_user(username: str, password: str) -> dict:
+    if username == "admin" and password == "password":  # Thay bằng kiểm tra DB
+        return {"sub": username, "role": "admin"}
+    elif username == "doctor" and password == "password":
+        return {"sub": username, "role": "doctor"}
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+# Hàm kiểm tra token
+def is_valid_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# Middleware: Kiểm tra HTTPS và token cơ bản
+@app.middleware("http")
+async def check_token_and_https(request: Request, call_next):
+    if request.url.path.startswith("/patients"):
+        # Bỏ kiểm tra HTTPS khi chạy local
+        # if request.url.scheme != "https":
+        #     raise HTTPException(status_code=403, detail="HTTPS required")
+        token = request.headers.get("Authorization", "").replace("Bearer ", "")
+        if not token or not is_valid_token(token):
+            raise HTTPException(status_code=401, detail="Invalid or missing token")
+    response = await call_next(request)
+    return response
+
+# Endpoint đăng nhập để sinh token
+@app.post("/token")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = verify_user(form_data.username, form_data.password)
+    token = jwt.encode(user, SECRET_KEY, algorithm=ALGORITHM)
+    return {"access_token": token, "token_type": "bearer"}
+
+# Security: Kiểm tra quyền admin
+async def require_admin(token: str = Depends(oauth2_scheme)):
+    payload = is_valid_token(token)
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return payload
 
 # Endpoint: Lấy danh sách bệnh nhân với phân trang
 @app.get("/patients/")
@@ -121,7 +173,7 @@ async def read_current_patient():
 async def read_patient(
     patient_id: Annotated[str, Path(validate=AfterValidator(check_valid_patient_id))],
     test_type: Annotated[
-        str | None,
+        Optional[str],
         Query(
             title="Test Type",
             description="Filter by specific test type",
@@ -169,20 +221,24 @@ async def read_patient_test(
             return {"patient_id": patient_id, "test_result": test_result}
     raise HTTPException(status_code=404, detail="Patient not found")
 
-# Endpoint: Tạo bệnh nhân mới
+# Endpoint: Tạo bệnh nhân mới (chỉ admin)
 @app.post("/patients/")
-async def create_patient(patient: Annotated[Patient, Body(embed=True)]):
+async def create_patient(
+    patient: Annotated[Patient, Body(embed=True)],
+    token: dict = Depends(require_admin)
+):
     new_id = f"P{len(patients_db) + 1:03d}"
     patient_dict = patient.dict()
     patient_dict["patient_id"] = new_id
     patients_db.append(patient_dict)
     return patient_dict
 
-# Endpoint: Cập nhật thông tin bệnh nhân
+# Endpoint: Cập nhật thông tin bệnh nhân (chỉ admin)
 @app.put("/patients/{patient_id}")
 async def update_patient(
     patient_id: Annotated[str, Path(validate=AfterValidator(check_valid_patient_id))],
-    patient: Annotated[Patient, Body(embed=True)]
+    patient: Annotated[Patient, Body(embed=True)],
+    token: dict = Depends(require_admin)
 ):
     patient_dict = patient.dict()
     patient_dict["patient_id"] = patient_id

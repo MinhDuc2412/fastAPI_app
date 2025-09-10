@@ -4,10 +4,25 @@ from pydantic import BaseModel, Field
 from typing import Annotated, Optional
 from fastapi import Query, Path, Body
 from pydantic.functional_validators import AfterValidator
-import jwt  
+import jwt
 import random
+import os
+from pymongo import MongoClient
+from bson.objectid import ObjectId  
+import logging
+from fastapi import FastAPI, HTTPException, Request
+from starlette.responses import JSONResponse
+from datetime import datetime
+
 
 app = FastAPI()
+
+# Kết nối MongoDB
+MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://localhost:27017/mydatabase')
+client = MongoClient(MONGO_URI)
+db = client["mydatabase"]
+patients_collection = db["patients"]
+
 
 # fake_items_db = [{"item_name": "Chin"}, {"item_name": "Loan"},{"item_name": "Diu"} , {"item_name": "Hoang"}, {"item_name": "Duc"}]
 
@@ -59,7 +74,9 @@ app = FastAPI()
 #     item = {"item_id": item_id, "needy": needy}
 #     return item
 
-
+# Cấu hình logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 SECRET_KEY = "my-secret-key"
@@ -96,49 +113,6 @@ def check_valid_patient_id(patient_id: str) -> str:
         raise ValueError('Invalid patient_id format, it must be "P" followed by 3 digits')
     return patient_id
 
-# Hàm kiểm tra username/password
-def verify_user(username: str, password: str) -> dict:
-    if username == "admin" and password == "password":  # Thay bằng kiểm tra DB
-        return {"sub": username, "role": "admin"}
-    elif username == "doctor" and password == "password":
-        return {"sub": username, "role": "doctor"}
-    raise HTTPException(status_code=401, detail="Invalid credentials")
-
-# Hàm kiểm tra token
-def is_valid_token(token: str) -> dict:
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-# Middleware: Kiểm tra HTTPS và token cơ bản
-@app.middleware("http")
-async def check_token_and_https(request: Request, call_next):
-    if request.url.path.startswith("/patients"):
-        # Bỏ kiểm tra HTTPS khi chạy local
-        # if request.url.scheme != "https":
-        #     raise HTTPException(status_code=403, detail="HTTPS required")
-        token = request.headers.get("Authorization", "").replace("Bearer ", "")
-        if not token or not is_valid_token(token):
-            raise HTTPException(status_code=401, detail="Invalid or missing token")
-    response = await call_next(request)
-    return response
-
-# Endpoint đăng nhập để sinh token
-@app.post("/token")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = verify_user(form_data.username, form_data.password)
-    token = jwt.encode(user, SECRET_KEY, algorithm=ALGORITHM)
-    return {"access_token": token, "token_type": "bearer"}
-
-# Security: Kiểm tra quyền admin
-async def require_admin(token: str = Depends(oauth2_scheme)):
-    payload = is_valid_token(token)
-    if payload.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return payload
-
 # Endpoint: Lấy danh sách bệnh nhân với phân trang
 @app.get("/patients/")
 async def read_patients(
@@ -160,13 +134,28 @@ async def read_patients(
         )
     ] = 10
 ):
-    return patients_db[skip: skip + limit]
+    try:
+        logger.info(f"Fetching patients with skip={skip}, limit={limit}")
+        patients = list(patients_collection.find().skip(skip).limit(limit))
+        logger.info(f"Found {len(patients)} patients")
+        for patient in patients:
+            patient["_id"] = str(patient["_id"])
+        return patients
+    except Exception as e:
+        logger.error(f"Error in read_patients: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-# Endpoint: Lấy thông tin bệnh nhân hiện tại
+# Endpoint: Lấy thông tin bệnh nhân hiện tại (ngẫu nhiên)
 @app.get("/patients/me")
 async def read_current_patient():
-    patient = random.choice(patients_db)
-    return {"patient_id": patient["patient_id"], "message": "This is the current patient", **patient}
+    try:
+        patient = patients_collection.aggregate([{"$sample": {"size": 1}}]).next()
+        if patient:
+            patient["_id"] = str(patient["_id"])
+            return {"patient_id": patient.get("patient_id"), "message": "This is the current patient", **patient}
+        raise HTTPException(status_code=404, detail="No patients found")
+    except StopIteration:
+        raise HTTPException(status_code=404, detail="No patients found")
 
 # Endpoint: Lấy thông tin bệnh nhân theo patient_id
 @app.get("/patients/{patient_id}")
@@ -189,14 +178,10 @@ async def read_patient(
         )
     ] = False
 ):
-    patient = {"patient_id": patient_id}
-    for p in patients_db:
-        if p["patient_id"] == patient_id:
-            patient.update(p)
-            break
-    else:
+    patient = patients_collection.find_one({"patient_id": patient_id})
+    if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
-
+    patient["_id"] = str(patient["_id"])
     if test_type:
         patient["test_type"] = test_type
     if detailed:
@@ -216,34 +201,35 @@ async def read_patient_test(
         )
     ]
 ):
-    for p in patients_db:
-        if p["patient_id"] == patient_id:
-            return {"patient_id": patient_id, "test_result": test_result}
-    raise HTTPException(status_code=404, detail="Patient not found")
+    patient = patients_collection.find_one({"patient_id": patient_id})
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    return {"patient_id": patient_id, "test_result": patient.get("test_result", test_result)}
 
-# Endpoint: Tạo bệnh nhân mới (chỉ admin)
+# Endpoint: Tạo bệnh nhân mới
 @app.post("/patients/")
 async def create_patient(
-    patient: Annotated[Patient, Body(embed=True)],
-    token: dict = Depends(require_admin)
+    patient: Annotated[Patient, Body(embed=True)]
 ):
-    new_id = f"P{len(patients_db) + 1:03d}"
+    existing_ids = [p["patient_id"] for p in patients_collection.find({}, {"patient_id": 1})]
+    new_id = f"P{len(existing_ids) + 1:03d}"
     patient_dict = patient.dict()
     patient_dict["patient_id"] = new_id
-    patients_db.append(patient_dict)
+    patient_dict["created_at"] = datetime.now().isoformat()
+    result = patients_collection.insert_one(patient_dict)
+    patient_dict["_id"] = str(result.inserted_id)
     return patient_dict
 
-# Endpoint: Cập nhật thông tin bệnh nhân (chỉ admin)
+# Endpoint: Cập nhật thông tin bệnh nhân
 @app.put("/patients/{patient_id}")
 async def update_patient(
     patient_id: Annotated[str, Path(validate=AfterValidator(check_valid_patient_id))],
-    patient: Annotated[Patient, Body(embed=True)],
-    token: dict = Depends(require_admin)
+    patient: Annotated[Patient, Body(embed=True)]
 ):
     patient_dict = patient.dict()
     patient_dict["patient_id"] = patient_id
-    for i, existing_patient in enumerate(patients_db):
-        if existing_patient["patient_id"] == patient_id:
-            patients_db[i] = patient_dict
-            return {"patient_id": patient_id, **patient_dict}
-    raise HTTPException(status_code=404, detail="Patient not found")
+    patient_dict["updated_at"] = datetime.now().isoformat()
+    result = patients_collection.replace_one({"patient_id": patient_id}, patient_dict, upsert=True)
+    if result.matched_count == 0 and result.upserted_id is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    return {"patient_id": patient_id, **patient_dict}
